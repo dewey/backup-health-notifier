@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path"
 	"sort"
+
+	"github.com/docker/go-units"
 )
 
 // runBackup runs the database backup shell script and checks the exit code
@@ -36,9 +38,9 @@ func runBackup() error {
 type historyComparisonFiles struct {
 	fileName    string
 	status      string // new, deleted, difference
-	fileSizeNew int64
-	fileSizeOld int64
-	difference  int64
+	fileSizeNew float64
+	fileSizeOld float64
+	difference  float64
 }
 type historyComparison struct {
 	backupName           string
@@ -130,10 +132,10 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 				//fmt.Printf("Key '%s' exists in both. Difference: %d\n", key, nextValue-currentValue)
 				diff.comparedFiles = append(diff.comparedFiles, historyComparisonFiles{
 					fileName:    key,
-					status:      "difference",
-					fileSizeNew: nextValue,
-					fileSizeOld: currentValue,
-					difference:  nextValue - currentValue,
+					status:      "existing",
+					fileSizeNew: float64(nextValue),
+					fileSizeOld: float64(currentValue),
+					difference:  float64(nextValue - currentValue),
 				})
 			} else {
 				//fmt.Printf("Key '%s' was deleted.\n", key)
@@ -162,22 +164,33 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 func main() {
 	if err := runBackup(); err != nil {
 		fmt.Println(err)
+		return
 	}
 	// Check size of backup file
 	history, exists, err := checkBackupHistory()
 	if err != nil {
 		fmt.Println("Error checking backup history:", err)
+		return
 	}
 	if exists {
-		fmt.Println("Backup exists")
 		for _, comparison := range history {
 			fmt.Printf("Comparison between %s and %s:\n", comparison.backupName, comparison.backupComparisonName)
 			for _, file := range comparison.comparedFiles {
-				fmt.Printf("File: %s, Status: %s, Difference: %d\n", file.fileName, file.status, file.difference)
+				fmt.Println("-------------------------------------------------")
+				fmt.Println("File:", file.fileName)
+				if file.status != "existing" {
+					fmt.Println("Status:", file.status)
+				}
+				if file.difference != 0 {
+					fmt.Printf("Difference: %s (Old: %s, New: %s)\n", units.HumanSize(file.difference), units.HumanSize(file.fileSizeOld), units.HumanSize(file.fileSizeNew))
+				} else {
+					fmt.Printf("Difference: None (Current: %s)\n", units.HumanSize(file.fileSizeOld))
+				}
 			}
 		}
 	} else {
 		fmt.Println("Backup does not exist")
+		return
 	}
 	// Compare size of backup file with previous backup file, check created at timestamp of previous file
 
