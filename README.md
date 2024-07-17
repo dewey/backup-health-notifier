@@ -1,6 +1,6 @@
 # backup-health-notifier
 
-This is a health checking script to monitor the execution of [pg_backup_rotated.sh]((https://wiki.postgresql.org/wiki/Automated_Backup_on_Linux). It will send a daily email with 
+This is a health checking script to monitor the execution of [pg_backup_rotated.sh](https://wiki.postgresql.org/wiki/Automated_Backup_on_Linux). It will send a daily email with 
 the size of all backups, and a comparison to the previous day.
 
 This does not aim to be a full monitoring solution, but rather a simple way to get notified if the backup script fails for
