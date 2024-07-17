@@ -306,7 +306,7 @@ func main() {
 		return
 	}
 	if exists {
-		level.Info(l).Log("msg", "backup exists, send out health status message")
+		level.Info(l).Log("msg", "successfully checked backup, send out health status message")
 		if err := sendEmail(client, *fromMailAddress, *toMailAddress, *postmarkTemplateID, history); err != nil {
 			level.Error(l).Log("msg", "error sending email", "err", err)
 			return
