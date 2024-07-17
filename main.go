@@ -18,37 +18,40 @@ import (
 )
 
 // executeBackupScript runs the database backup shell script and checks the exit code
-func executeBackupScript(passFilePath string, configFilePath string, scriptPath string) error {
+func executeBackupScript(l log.Logger, passFilePath string, configFilePath string, scriptPath string) (string, error) {
 	var (
 		ee *exec.ExitError
 		pe *os.PathError
 	)
 	if scriptPath == "" {
-		return errors.New("script path is empty")
+		return "", errors.New("script path is empty")
 	}
 	if configFilePath == "" {
-		return errors.New("config file path is empty")
+		return "", errors.New("config file path is empty")
 	}
 	cmd := exec.Command("bash", "-c", "source "+configFilePath)
-	if err := cmd.Run(); err != nil {
-		return err
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		level.Error(l).Log("msg", "sourcing config file", "err", err)
+		return string(out), err
 	}
-	cmd = exec.Command("/bin/sh", scriptPath)
 	cmd.Env = os.Environ()
-
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSFILE=%s", passFilePath))
-	err := cmd.Run()
+	cmd = exec.Command("/bin/bash", scriptPath)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSFILE=%s", passFilePath), fmt.Sprintf("CONFIG_FILE_PATH=%s", configFilePath))
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
 	if errors.As(err, &ee) {
-		return fmt.Errorf("exit code error: %d", ee.ExitCode()) // ran, but non-zero exit code
+		return string(out), fmt.Errorf("exit code error: %d", ee.ExitCode()) // ran, but non-zero exit code
 
 	} else if errors.As(err, &pe) {
-		return fmt.Errorf("os.PathError: %v", pe) // "no such file ...", "permission denied" etc.
+		return string(out), fmt.Errorf("os.PathError: %v", pe) // "no such file ...", "permission denied" etc.
 
 	} else if err != nil {
-		return err
-
+		return string(out), err
 	} else {
-		return nil
+		return string(out), nil
 	}
 }
 
@@ -292,7 +295,8 @@ func main() {
 			Transport: &postmark.AuthTransport{Token: *postmarkToken},
 		}),
 	)
-	if err := executeBackupScript(*passFilePath, *configFilePath, *backupScriptPath); err != nil {
+	_, err := executeBackupScript(l, *passFilePath, *configFilePath, *backupScriptPath)
+	if err != nil {
 		level.Error(l).Log("msg", "error running backup", "err", err)
 		return
 	}
