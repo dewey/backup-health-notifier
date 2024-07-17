@@ -18,14 +18,25 @@ import (
 )
 
 // executeBackupScript runs the database backup shell script and checks the exit code
-func executeBackupScript() error {
+func executeBackupScript(passFilePath string, configFilePath string, scriptPath string) error {
 	var (
 		ee *exec.ExitError
 		pe *os.PathError
 	)
-	cmd := exec.Command("/bin/sh", "backup-success.sh")
+	if scriptPath == "" {
+		return errors.New("script path is empty")
+	}
+	if configFilePath == "" {
+		return errors.New("config file path is empty")
+	}
+	cmd := exec.Command("bash", "-c", "source "+configFilePath)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	cmd = exec.Command("/bin/sh", scriptPath)
 	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, "PGPASSFILE=/root/.pgpass")
+
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PGPASSFILE=%s", passFilePath))
 	err := cmd.Run()
 	if errors.As(err, &ee) {
 		return fmt.Errorf("exit code error: %d", ee.ExitCode()) // ran, but non-zero exit code
@@ -239,17 +250,24 @@ func main() {
 	var l log.Logger
 	l = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
 	l = log.With(l, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
-	fs := flag.NewFlagSet("backup-health", flag.ContinueOnError)
+	fs := flag.NewFlagSet("backup-health-notifier", flag.ContinueOnError)
 	var (
-		postmarkToken = fs.String("postmark_token", "", "The postmarkapp.com api token")
-		backupPath    = fs.String("backup-path", "", "The absolute path to the Postgres backup location")
+		postmarkToken    = fs.String("postmark-token", "", "The postmarkapp.com api token")
+		backupPath       = fs.String("backup-path", "", "The absolute path to the Postgres backup location")
+		configFilePath   = fs.String("config-file-path", "", "The path to the config file used in the Postgres backup script")
+		passFilePath     = fs.String("pass-file-path", "", "The path to the Postgres pass file")
+		backupScriptPath = fs.String("backup-script-path", "", "The path to the backup script that should be executed")
 	)
 
 	if err := ff.Parse(fs, os.Args[1:],
 		ff.WithEnvVars(),
 	); err != nil {
-		fmt.Println(err)
 		level.Error(l).Log("msg", "error parsing flags", "err", err)
+		return
+	}
+
+	if *configFilePath == "" || *passFilePath == "" || *backupScriptPath == "" {
+		level.Error(l).Log("msg", "missing backup environment values for config-file-path, backup-script-path or pass-file-path.")
 		return
 	}
 
@@ -266,7 +284,7 @@ func main() {
 			Transport: &postmark.AuthTransport{Token: *postmarkToken},
 		}),
 	)
-	if err := executeBackupScript(); err != nil {
+	if err := executeBackupScript(*passFilePath, *configFilePath, *backupScriptPath); err != nil {
 		level.Error(l).Log("msg", "error running backup", "err", err)
 		return
 	}

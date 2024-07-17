@@ -1,4 +1,4 @@
-module backup-health
+module backup-health-notifier
 
 go 1.22.4
 
