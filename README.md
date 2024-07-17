@@ -34,4 +34,5 @@ TO_EMAIL_ADDRESS=mail@example.com
 
 Not pretty, but it does the job.
 
-![Health check email](https://img.notmyhostna.me/rLXpVTW1bkMZWJQH1YR9)
+![Screenshot 2024-07-17 at 22 02 51 png@2x](https://github.com/user-attachments/assets/cf54f6c8-10e7-4cf0-9929-e945b2e30de4)
+
