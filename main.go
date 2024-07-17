@@ -2,17 +2,23 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"sort"
 
-	"github.com/docker/go-units"
+	"github.com/dustin/go-humanize"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/mattevans/postmark-go"
+	"github.com/peterbourgon/ff/v3"
 )
 
-// runBackup runs the database backup shell script and checks the exit code
-func runBackup() error {
+// executeBackupScript runs the database backup shell script and checks the exit code
+func executeBackupScript() error {
 	var (
 		ee *exec.ExitError
 		pe *os.PathError
@@ -35,26 +41,26 @@ func runBackup() error {
 	}
 }
 
-type historyComparisonFiles struct {
-	fileName    string
-	status      string // new, deleted, difference
-	fileSizeNew float64
-	fileSizeOld float64
-	difference  float64
+type HistoryComparisonFiles struct {
+	FileName            string `json:"file_name"`
+	Status              string `json:"status"`
+	FileSizeNew         int64  `json:"file_size_new"`
+	FileSizeOld         int64  `json:"file_size_old"`
+	Difference          int64  `json:"difference"`
+	DifferenceHumanized string `json:"difference_humanized"`
 }
-type historyComparison struct {
-	backupName           string
-	backupComparisonName string
-	comparedFiles        []historyComparisonFiles
+type HistoryComparison struct {
+	BackupName           string                   `json:"backup_name"`
+	BackupComparisonName string                   `json:"backup_comparison_name"`
+	ComparedFiles        []HistoryComparisonFiles `json:"compared_files"`
 }
 
 // checkBackupHistory reads the backup directory and checks the backup history, we return if a backup exists and if there's any errors
-func checkBackupHistory() ([]historyComparison, bool, error) {
+func checkBackupHistory(backupPath string) ([]HistoryComparison, bool, error) {
 	// Read directory contents
-	parentBackupPath := "backup-directory/postgresql-backups"
+	parentBackupPath := backupPath
 	files, err := os.ReadDir(parentBackupPath)
 	if err != nil {
-		fmt.Println("Error reading directory:", err)
 		return nil, false, err
 	}
 
@@ -89,7 +95,7 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 
 	var previousBackups []backupMeta
 	for i, fileInfo := range fileInfos {
-		if i <= 2 {
+		if i < 2 {
 			files, err := os.ReadDir(path.Join(parentBackupPath, fileInfo.Name()))
 			if err != nil {
 				return nil, true, err
@@ -116,32 +122,46 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 		}
 	}
 
-	var historyComparisons []historyComparison
+	var historyComparisons []HistoryComparison
 	for i := 0; i < len(previousBackups)-1; i++ {
 		current := previousBackups[i].fileSizes
 		next := previousBackups[i+1].fileSizes
 
 		//fmt.Printf("Comparing entry %s with entry %s:\n", previousBackups[i].backupName, previousBackups[i+1].backupName)
-		diff := historyComparison{
-			backupName:           previousBackups[i].backupName,
-			backupComparisonName: previousBackups[i+1].backupName,
+		diff := HistoryComparison{
+			BackupName:           previousBackups[i].backupName,
+			BackupComparisonName: previousBackups[i+1].backupName,
 		}
 		// Check keys in the current map
 		for key, currentValue := range current {
 			if nextValue, exists := next[key]; exists {
 				//fmt.Printf("Key '%s' exists in both. Difference: %d\n", key, nextValue-currentValue)
-				diff.comparedFiles = append(diff.comparedFiles, historyComparisonFiles{
-					fileName:    key,
-					status:      "existing",
-					fileSizeNew: float64(nextValue),
-					fileSizeOld: float64(currentValue),
-					difference:  float64(nextValue - currentValue),
-				})
+				hcf := HistoryComparisonFiles{
+					FileName:    key,
+					Status:      "existing",
+					FileSizeNew: nextValue,
+					FileSizeOld: currentValue,
+					Difference:  nextValue - currentValue,
+				}
+				var difference string
+				if hcf.Difference > 0 {
+					difference = humanize.Bytes(uint64(hcf.Difference))
+				} else {
+					difference = fmt.Sprintf("-%s", humanize.Bytes(uint64(hcf.Difference*-1)))
+				}
+				if hcf.Difference > 0 {
+					hcf.DifferenceHumanized = fmt.Sprintf("Difference: %s (Old: %s, New: %s)", difference, humanize.Bytes(uint64(hcf.FileSizeOld)), humanize.Bytes(uint64(hcf.FileSizeNew)))
+				} else {
+					hcf.DifferenceHumanized = fmt.Sprintf("Difference: None (Current: %s)", humanize.Bytes(uint64(hcf.FileSizeOld)))
+				}
+
+				diff.ComparedFiles = append(diff.ComparedFiles, hcf)
+
 			} else {
 				//fmt.Printf("Key '%s' was deleted.\n", key)
-				diff.comparedFiles = append(diff.comparedFiles, historyComparisonFiles{
-					fileName: key,
-					status:   "deleted",
+				diff.ComparedFiles = append(diff.ComparedFiles, HistoryComparisonFiles{
+					FileName: key,
+					Status:   "deleted",
 				})
 			}
 		}
@@ -150,9 +170,9 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 		for key := range next {
 			if _, exists := current[key]; !exists {
 				//fmt.Printf("Key '%s' is new.\n", key)
-				diff.comparedFiles = append(diff.comparedFiles, historyComparisonFiles{
-					fileName: key,
-					status:   "new",
+				diff.ComparedFiles = append(diff.ComparedFiles, HistoryComparisonFiles{
+					FileName: key,
+					Status:   "new",
 				})
 			}
 		}
@@ -161,39 +181,107 @@ func checkBackupHistory() ([]historyComparison, bool, error) {
 	return historyComparisons, true, nil
 }
 
+// printBackupHistory prints the backup history, it ignores everything below the threshold in bytes
+func printBackupHistory(history []HistoryComparison, ignoreThreshold int64) {
+	for _, comparison := range history {
+		fmt.Printf("Comparison between %s and %s:\n", comparison.BackupName, comparison.BackupComparisonName)
+		for _, file := range comparison.ComparedFiles {
+			fmt.Println("-------------------------------------------------")
+			fmt.Println("File:", file.FileName)
+			if file.Status != "existing" {
+				fmt.Println("Status:", file.Status)
+			}
+			if file.Difference != 0 {
+				var differenceUnsigned int64
+				if file.Difference > 0 {
+					differenceUnsigned = file.Difference
+				} else {
+					differenceUnsigned = file.Difference * -1
+				}
+				if differenceUnsigned > ignoreThreshold {
+					fmt.Println(file.DifferenceHumanized)
+				}
+				continue
+			}
+			fmt.Println(file.DifferenceHumanized)
+		}
+	}
+}
+
+// sendEmail sends an email with the backup history
+func sendEmail(client *postmark.Client, history []HistoryComparison) error {
+	var subjectBackupName string
+	for _, comparison := range history {
+		subjectBackupName = comparison.BackupName
+		break
+	}
+	emailReq := &postmark.Email{
+		From:       "monitoring@notmyhostna.me",
+		To:         "mail@notmyhostna.me",
+		TemplateID: 36644330,
+		TemplateModel: map[string]interface{}{
+			"history":     history,
+			"backup_name": subjectBackupName,
+		},
+	}
+
+	_, response, err := client.Email.Send(emailReq)
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", response.StatusCode)
+	}
+	return nil
+}
+
 func main() {
-	if err := runBackup(); err != nil {
+	var l log.Logger
+	l = log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	l = log.With(l, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
+	fs := flag.NewFlagSet("backup-health", flag.ContinueOnError)
+	var (
+		postmarkToken = fs.String("postmark_token", "", "The postmarkapp.com api token")
+		backupPath    = fs.String("backup-path", "", "The absolute path to the Postgres backup location")
+	)
+
+	if err := ff.Parse(fs, os.Args[1:],
+		ff.WithEnvVars(),
+	); err != nil {
 		fmt.Println(err)
+		level.Error(l).Log("msg", "error parsing flags", "err", err)
 		return
 	}
-	// Check size of backup file
-	history, exists, err := checkBackupHistory()
+
+	if *postmarkToken == "" {
+		level.Error(l).Log("msg", "missing postmark token")
+		return
+	}
+	if *backupPath == "" {
+		level.Error(l).Log("msg", "missing backup path")
+		return
+	}
+	client := postmark.NewClient(
+		postmark.WithClient(&http.Client{
+			Transport: &postmark.AuthTransport{Token: *postmarkToken},
+		}),
+	)
+	if err := executeBackupScript(); err != nil {
+		level.Error(l).Log("msg", "error running backup", "err", err)
+		return
+	}
+	history, exists, err := checkBackupHistory(*backupPath)
 	if err != nil {
-		fmt.Println("Error checking backup history:", err)
+		level.Error(l).Log("msg", "error checking backup history", "err", err)
 		return
 	}
 	if exists {
-		for _, comparison := range history {
-			fmt.Printf("Comparison between %s and %s:\n", comparison.backupName, comparison.backupComparisonName)
-			for _, file := range comparison.comparedFiles {
-				fmt.Println("-------------------------------------------------")
-				fmt.Println("File:", file.fileName)
-				if file.status != "existing" {
-					fmt.Println("Status:", file.status)
-				}
-				if file.difference != 0 {
-					fmt.Printf("Difference: %s (Old: %s, New: %s)\n", units.HumanSize(file.difference), units.HumanSize(file.fileSizeOld), units.HumanSize(file.fileSizeNew))
-				} else {
-					fmt.Printf("Difference: None (Current: %s)\n", units.HumanSize(file.fileSizeOld))
-				}
-			}
+		level.Info(l).Log("msg", "backup exists, send out health status message")
+		if err := sendEmail(client, history); err != nil {
+			level.Error(l).Log("msg", "error sending email", "err", err)
+			return
 		}
-	} else {
-		fmt.Println("Backup does not exist")
 		return
 	}
-	// Compare size of backup file with previous backup file, check created at timestamp of previous file
-
-	// Run file backup script
-
+	level.Info(l).Log("msg", "backup does not exist, no health status message sent")
 }
