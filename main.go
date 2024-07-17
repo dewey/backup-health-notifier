@@ -220,16 +220,16 @@ func printBackupHistory(history []HistoryComparison, ignoreThreshold int64) {
 }
 
 // sendEmail sends an email with the backup history
-func sendEmail(client *postmark.Client, history []HistoryComparison) error {
+func sendEmail(client *postmark.Client, from string, to string, templateID int, history []HistoryComparison) error {
 	var subjectBackupName string
 	for _, comparison := range history {
 		subjectBackupName = comparison.BackupName
 		break
 	}
 	emailReq := &postmark.Email{
-		From:       "monitoring@notmyhostna.me",
-		To:         "mail@notmyhostna.me",
-		TemplateID: 36644330,
+		From:       from,
+		To:         to,
+		TemplateID: templateID,
 		TemplateModel: map[string]interface{}{
 			"history":     history,
 			"backup_name": subjectBackupName,
@@ -252,11 +252,14 @@ func main() {
 	l = log.With(l, "ts", log.DefaultTimestampUTC, "caller", log.DefaultCaller)
 	fs := flag.NewFlagSet("backup-health-notifier", flag.ContinueOnError)
 	var (
-		postmarkToken    = fs.String("postmark-token", "", "The postmarkapp.com api token")
-		backupPath       = fs.String("backup-path", "", "The absolute path to the Postgres backup location")
-		configFilePath   = fs.String("config-file-path", "", "The path to the config file used in the Postgres backup script")
-		passFilePath     = fs.String("pass-file-path", "", "The path to the Postgres pass file")
-		backupScriptPath = fs.String("backup-script-path", "", "The path to the backup script that should be executed")
+		postmarkToken      = fs.String("postmark-token", "", "The postmarkapp.com api token")
+		postmarkTemplateID = fs.Int("postmark-template-id", 0, "The id of the template to be used for the email")
+		backupPath         = fs.String("backup-path", "", "The absolute path to the Postgres backup location")
+		configFilePath     = fs.String("config-file-path", "", "The path to the config file used in the Postgres backup script")
+		passFilePath       = fs.String("pass-file-path", "", "The path to the Postgres pass file")
+		backupScriptPath   = fs.String("backup-script-path", "", "The path to the backup script that should be executed")
+		fromMailAddress    = fs.String("from-email-address", "", "The email address we are sending the notification from, make sure it's set up in Postmark")
+		toMailAddress      = fs.String("to-email-address", "", "The email address we are sending the notification from, make sure it's set up in Postmark")
 	)
 
 	if err := ff.Parse(fs, os.Args[1:],
@@ -271,12 +274,17 @@ func main() {
 		return
 	}
 
-	if *postmarkToken == "" {
-		level.Error(l).Log("msg", "missing postmark token")
+	if *postmarkToken == "" || *postmarkTemplateID == 0 {
+		level.Error(l).Log("msg", "missing postmark token or template id")
 		return
 	}
 	if *backupPath == "" {
 		level.Error(l).Log("msg", "missing backup path")
+		return
+	}
+
+	if *fromMailAddress == "" || *toMailAddress == "" {
+		level.Error(l).Log("msg", "missing from or to mail address to send notification emails")
 		return
 	}
 	client := postmark.NewClient(
@@ -295,7 +303,7 @@ func main() {
 	}
 	if exists {
 		level.Info(l).Log("msg", "backup exists, send out health status message")
-		if err := sendEmail(client, history); err != nil {
+		if err := sendEmail(client, *fromMailAddress, *toMailAddress, *postmarkTemplateID, history); err != nil {
 			level.Error(l).Log("msg", "error sending email", "err", err)
 			return
 		}
